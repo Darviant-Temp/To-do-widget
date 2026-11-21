@@ -8,30 +8,327 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
+    - uses: actions/checkout@v4
+    - uses: actions/setup-java@v4
       with:
         java-version: '17'
         distribution: 'temurin'
-
-    - name: Setup Gradle
-      uses: gradle/actions/setup-gradle@v4
+    - uses: gradle/actions/setup-gradle@v4
       with:
         gradle-version: '8.7'
 
-    - name: Build Debug APK
+    - name: Write project files
       run: |
-        if [ -f "./gradlew" ]; then
-          chmod +x gradlew
-          ./gradlew assembleDebug
-        else
-          gradle assembleDebug
-        fi
+        P=app/src/main
+        K=$P/java/com/darshan/todo
+        mkdir -p $K $P/res/xml $P/res/drawable
+        cat > settings.gradle.kts <<'EOF'
+        pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+        dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+        rootProject.name = "TodoWidget"
+        include(":app")
+        EOF
+        cat > build.gradle.kts <<'EOF'
+        plugins {
+            id("com.android.application") version "8.5.2" apply false
+            id("org.jetbrains.kotlin.android") version "2.0.20" apply false
+            id("org.jetbrains.kotlin.plugin.compose") version "2.0.20" apply false
+        }
+        EOF
+        echo "android.useAndroidX=true" > gradle.properties
+        cat > app/build.gradle.kts <<'EOF'
+        plugins {
+            id("com.android.application")
+            id("org.jetbrains.kotlin.android")
+            id("org.jetbrains.kotlin.plugin.compose")
+        }
+        android {
+            namespace = "com.darshan.todo"
+            compileSdk = 34
+            defaultConfig { applicationId = "com.darshan.todo"; minSdk = 26; targetSdk = 34; versionCode = 1; versionName = "1.0" }
+            buildFeatures { compose = true }
+            compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+            kotlinOptions { jvmTarget = "17" }
+        }
+        dependencies {
+            implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+            implementation("androidx.compose.material3:material3")
+            implementation("androidx.activity:activity-compose:1.9.2")
+            implementation("androidx.glance:glance-appwidget:1.1.0")
+        }
+        EOF
+        cat > $P/AndroidManifest.xml <<'EOF'
+        <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <application android:label="Todo" android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+                <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
+                    <intent-filter>
+                        <action android:name="android.intent.action.MAIN"/>
+                        <category android:name="android.intent.category.LAUNCHER"/>
+                    </intent-filter>
+                </activity>
+                <receiver android:name=".TodoReceiver" android:exported="true">
+                    <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE"/></intent-filter>
+                    <meta-data android:name="android.appwidget.provider" android:resource="@xml/todo_widget_info"/>
+                </receiver>
+            </application>
+        </manifest>
+        EOF
+        cat > $P/res/xml/todo_widget_info.xml <<'EOF'
+        <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+            android:minWidth="180dp" android:minHeight="180dp"
+            android:resizeMode="horizontal|vertical" android:updatePeriodMillis="0"
+            android:initialLayout="@layout/glance_default_loading_layout"
+            android:widgetCategory="home_screen"/>
+        EOF
+        cat > $P/res/drawable/widget_bg.xml <<'EOF'
+        <shape xmlns:android="http://schemas.android.com/apk/res/android">
+            <gradient android:startColor="#F2F6F7FF" android:endColor="#F2DDE1FF" android:angle="135"/>
+            <corners android:radius="30dp"/>
+            <stroke android:width="1dp" android:color="#66FFFFFF"/>
+        </shape>
+        EOF
+        cat > $K/Store.kt <<'EOF'
+        package com.darshan.todo
+
+        import android.content.Context
+        import org.json.JSONArray
+        import org.json.JSONObject
+
+        data class Task(val id: Long, val title: String, val done: Boolean, val doneAt: Long = 0)
+
+        object Store {
+            private fun sp(c: Context) = c.getSharedPreferences("todo", Context.MODE_PRIVATE)
+
+            fun all(c: Context): List<Task> {
+                val a = JSONArray(sp(c).getString("tasks", "[]"))
+                return (0 until a.length()).map {
+                    val o = a.getJSONObject(it)
+                    Task(o.getLong("id"), o.getString("title"), o.getBoolean("done"), o.optLong("at"))
+                }
+            }
+
+            private fun save(c: Context, list: List<Task>) {
+                val a = JSONArray()
+                list.forEach { a.put(JSONObject().put("id", it.id).put("title", it.title).put("done", it.done).put("at", it.doneAt)) }
+                sp(c).edit().putString("tasks", a.toString()).apply()
+            }
+
+            fun add(c: Context, title: String) = save(c, all(c) + Task(System.currentTimeMillis(), title, false))
+
+            fun toggle(c: Context, id: Long) = save(c, all(c).map {
+                if (it.id == id) it.copy(done = !it.done, doneAt = if (!it.done) System.currentTimeMillis() else 0) else it
+            })
+
+            fun delete(c: Context, id: Long) = save(c, all(c).filter { it.id != id })
+        }
+        EOF
+        cat > $K/TodoWidget.kt <<'EOF'
+        package com.darshan.todo
+
+        import android.content.Context
+        import androidx.compose.ui.graphics.Color
+        import androidx.compose.ui.unit.dp
+        import androidx.compose.ui.unit.sp
+        import androidx.glance.*
+        import androidx.glance.action.ActionParameters
+        import androidx.glance.action.actionParametersOf
+        import androidx.glance.action.clickable
+        import androidx.glance.appwidget.*
+        import androidx.glance.appwidget.action.ActionCallback
+        import androidx.glance.appwidget.action.actionRunCallback
+        import androidx.glance.appwidget.action.actionStartActivity
+        import androidx.glance.appwidget.lazy.LazyColumn
+        import androidx.glance.appwidget.lazy.items
+        import androidx.glance.layout.*
+        import androidx.glance.text.FontWeight
+        import androidx.glance.text.Text
+        import androidx.glance.text.TextStyle
+        import androidx.glance.unit.ColorProvider
+
+        val INK = Color(0xFF151A3B)
+        val INDIGO = Color(0xFF4B3BFF)
+        val TASK_ID = ActionParameters.Key<Long>("id")
+
+        class TodoWidget : GlanceAppWidget() {
+            override suspend fun provideGlance(context: Context, id: GlanceId) {
+                val tasks = Store.all(context).filter { !it.done }
+                provideContent {
+                    Column(
+                        GlanceModifier.fillMaxSize().background(ImageProvider(R.drawable.widget_bg)).padding(16.dp)
+                    ) {
+                        Row(
+                            GlanceModifier.fillMaxWidth().clickable(actionStartActivity<MainActivity>()),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Today", GlanceModifier.defaultWeight(),
+                                style = TextStyle(color = ColorProvider(INK), fontSize = 24.sp, fontWeight = FontWeight.Bold))
+                            Text("${tasks.size} left",
+                                style = TextStyle(color = ColorProvider(INDIGO), fontSize = 13.sp, fontWeight = FontWeight.Medium))
+                        }
+                        Spacer(GlanceModifier.height(6.dp))
+                        if (tasks.isEmpty()) {
+                            Text("All clear. Add the next one in the app.",
+                                style = TextStyle(color = ColorProvider(INK), fontSize = 14.sp))
+                        } else LazyColumn {
+                            items(tasks, itemId = { it.id }) { t ->
+                                CheckBox(
+                                    checked = false,
+                                    onCheckedChange = actionRunCallback<ToggleAction>(actionParametersOf(TASK_ID to t.id)),
+                                    text = t.title,
+                                    maxLines = 2,
+                                    style = TextStyle(color = ColorProvider(INK), fontSize = 15.sp),
+                                    colors = CheckboxDefaults.colors(
+                                        checkedColor = ColorProvider(INDIGO), uncheckedColor = ColorProvider(INDIGO)
+                                    ),
+                                    modifier = GlanceModifier.fillMaxWidth().padding(vertical = 3.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        class ToggleAction : ActionCallback {
+            override suspend fun onAction(context: Context, glanceId: GlanceId, parameters: ActionParameters) {
+                parameters[TASK_ID]?.let { Store.toggle(context, it) }
+                TodoWidget().updateAll(context)
+            }
+        }
+
+        class TodoReceiver : GlanceAppWidgetReceiver() {
+            override val glanceAppWidget: GlanceAppWidget = TodoWidget()
+        }
+        EOF
+        cat > $K/MainActivity.kt <<'EOF'
+        package com.darshan.todo
+
+        import android.os.Bundle
+        import androidx.activity.ComponentActivity
+        import androidx.activity.compose.setContent
+        import androidx.activity.enableEdgeToEdge
+        import androidx.compose.animation.core.animateFloatAsState
+        import androidx.compose.foundation.*
+        import androidx.compose.foundation.layout.*
+        import androidx.compose.foundation.lazy.LazyColumn
+        import androidx.compose.foundation.lazy.items
+        import androidx.compose.foundation.shape.CircleShape
+        import androidx.compose.foundation.shape.RoundedCornerShape
+        import androidx.compose.foundation.text.KeyboardActions
+        import androidx.compose.material3.*
+        import androidx.compose.runtime.*
+        import androidx.compose.ui.Alignment
+        import androidx.compose.ui.Modifier
+        import androidx.compose.ui.draw.clip
+        import androidx.compose.ui.graphics.Brush
+        import androidx.compose.ui.graphics.Color
+        import androidx.compose.ui.platform.LocalContext
+        import androidx.compose.ui.text.font.FontWeight
+        import androidx.compose.ui.text.style.TextDecoration
+        import androidx.compose.ui.unit.dp
+        import androidx.compose.ui.unit.sp
+        import androidx.glance.appwidget.updateAll
+        import kotlinx.coroutines.launch
+
+        class MainActivity : ComponentActivity() {
+            private var tick by mutableIntStateOf(0)
+            override fun onCreate(savedInstanceState: Bundle?) {
+                super.onCreate(savedInstanceState)
+                enableEdgeToEdge()
+                setContent { App(tick) }
+            }
+            override fun onResume() { super.onResume(); tick++ }
+        }
+
+        private val Mist = Color(0xFFEEF0FF)
+        private val Lilac = Color(0xFFD9DCFF)
+
+        @Composable
+        fun App(tick: Int) {
+            val ctx = LocalContext.current
+            val scope = rememberCoroutineScope()
+            var tasks by remember { mutableStateOf(Store.all(ctx)) }
+            LaunchedEffect(tick) { tasks = Store.all(ctx) }
+            var tab by remember { mutableIntStateOf(0) }
+            var text by remember { mutableStateOf("") }
+            fun sync() { tasks = Store.all(ctx); scope.launch { TodoWidget().updateAll(ctx) } }
+            fun add() { if (text.isNotBlank()) { Store.add(ctx, text.trim()); text = ""; sync() } }
+
+            val doneCount = tasks.count { it.done }
+            val progress by animateFloatAsState(if (tasks.isEmpty()) 0f else doneCount / tasks.size.toFloat(), label = "p")
+            val shown = if (tab == 0) tasks.filter { !it.done } else tasks.filter { it.done }.sortedByDescending { it.doneAt }
+
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Mist, Lilac)))) {
+                Column(Modifier.systemBarsPadding().imePadding().padding(horizontal = 22.dp)) {
+                    Spacer(Modifier.height(20.dp))
+                    Text("Today", color = INK, fontSize = 44.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-1.5).sp)
+                    Spacer(Modifier.height(10.dp))
+                    Box(Modifier.fillMaxWidth().height(8.dp).clip(CircleShape).background(Color.White.copy(alpha = .7f))) {
+                        Box(Modifier.fillMaxWidth(progress).fillMaxHeight().clip(CircleShape).background(INDIGO))
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text("$doneCount of ${tasks.size} done", color = INK.copy(alpha = .6f), fontSize = 13.sp)
+                    Spacer(Modifier.height(18.dp))
+                    Row(Modifier.clip(CircleShape).background(Color.White.copy(alpha = .6f)).padding(4.dp)) {
+                        listOf("To do", "Done").forEachIndexed { i, label ->
+                            Box(
+                                Modifier.clip(CircleShape).background(if (tab == i) INDIGO else Color.Transparent)
+                                    .clickable { tab = i }.padding(horizontal = 22.dp, vertical = 9.dp)
+                            ) { Text(label, color = if (tab == i) Color.White else INK, fontWeight = FontWeight.SemiBold) }
+                        }
+                    }
+                    Spacer(Modifier.height(14.dp))
+                    LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (shown.isEmpty()) item {
+                            Text(if (tab == 0) "Nothing pending. Add a task below." else "Ticked tasks land here.",
+                                color = INK.copy(alpha = .55f), modifier = Modifier.padding(top = 24.dp))
+                        }
+                        items(shown, key = { it.id }) { t ->
+                            Row(
+                                Modifier.fillMaxWidth().animateItem().clip(RoundedCornerShape(22.dp)).background(Color.White)
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    Modifier.size(28.dp).clip(CircleShape).background(if (t.done) INDIGO else Color.Transparent)
+                                        .border(2.dp, INDIGO, CircleShape).clickable { Store.toggle(ctx, t.id); sync() },
+                                    contentAlignment = Alignment.Center
+                                ) { if (t.done) Text("✓", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold) }
+                                Spacer(Modifier.width(14.dp))
+                                Text(
+                                    t.title, Modifier.weight(1f), fontSize = 17.sp,
+                                    color = if (t.done) INK.copy(alpha = .4f) else INK,
+                                    textDecoration = if (t.done) TextDecoration.LineThrough else null
+                                )
+                                if (t.done) Text("✕", color = INK.copy(alpha = .4f), fontSize = 16.sp,
+                                    modifier = Modifier.clickable { Store.delete(ctx, t.id); sync() }.padding(6.dp))
+                            }
+                        }
+                    }
+                    TextField(
+                        value = text, onValueChange = { text = it }, singleLine = true,
+                        placeholder = { Text("What needs doing?") },
+                        shape = RoundedCornerShape(26.dp),
+                        keyboardActions = KeyboardActions(onDone = { add() }),
+                        trailingIcon = {
+                            Box(Modifier.padding(end = 6.dp).size(40.dp).clip(CircleShape).background(INDIGO).clickable { add() },
+                                contentAlignment = Alignment.Center) { Text("+", color = Color.White, fontSize = 24.sp) }
+                        },
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.White, unfocusedContainerColor = Color.White,
+                            focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
+                            cursorColor = INDIGO, focusedTextColor = INK, unfocusedTextColor = INK
+                        ),
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp)
+                    )
+                }
+            }
+        }
+        EOF
+
+    - name: Build Debug APK
+      run: gradle assembleDebug
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
