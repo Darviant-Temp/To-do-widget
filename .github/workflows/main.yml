@@ -88,6 +88,22 @@ jobs:
             <stroke android:width="1dp" android:color="#66FFFFFF"/>
         </shape>
         EOF
+        cat > $P/res/drawable/ic_ring.xml <<'EOF'
+        <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+            <path android:strokeColor="#4B3BFF" android:strokeWidth="2"
+                android:pathData="M12,12m-9,0a9,9 0,1 1,18 0a9,9 0,1 1,-18 0"/>
+        </vector>
+        EOF
+        cat > $P/res/drawable/ic_check.xml <<'EOF'
+        <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+            <path android:fillColor="#4B3BFF"
+                android:pathData="M12,12m-10,0a10,10 0,1 1,20 0a10,10 0,1 1,-20 0"/>
+            <path android:strokeColor="#FFFFFF" android:strokeWidth="2" android:strokeLineCap="round"
+                android:strokeLineJoin="round" android:pathData="M7.5,12.5l3,3l6,-6.5"/>
+        </vector>
+        EOF
         cat > $K/Store.kt <<'EOF'
         package com.darshan.todo
 
@@ -100,6 +116,7 @@ jobs:
         object Store {
             private fun sp(c: Context) = c.getSharedPreferences("todo", Context.MODE_PRIVATE)
 
+            @Synchronized
             fun all(c: Context): List<Task> {
                 val a = JSONArray(sp(c).getString("tasks", "[]"))
                 return (0 until a.length()).map {
@@ -114,13 +131,27 @@ jobs:
                 sp(c).edit().putString("tasks", a.toString()).apply()
             }
 
+            @Synchronized
             fun add(c: Context, title: String) = save(c, all(c) + Task(System.currentTimeMillis(), title, false))
 
+            @Synchronized
             fun toggle(c: Context, id: Long) = save(c, all(c).map {
                 if (it.id == id) it.copy(done = !it.done, doneAt = if (!it.done) System.currentTimeMillis() else 0) else it
             })
 
+            @Synchronized
             fun delete(c: Context, id: Long) = save(c, all(c).filter { it.id != id })
+
+            @Synchronized
+            fun completing(c: Context): Set<Long> =
+                sp(c).getStringSet("busy", emptySet())!!.mapNotNull { it.toLongOrNull() }.toSet()
+
+            @Synchronized
+            fun setCompleting(c: Context, id: Long, on: Boolean) {
+                val s = sp(c).getStringSet("busy", emptySet())!!.toMutableSet()
+                if (on) s.add(id.toString()) else s.remove(id.toString())
+                sp(c).edit().putStringSet("busy", s).apply()
+            }
         }
         EOF
         cat > $K/TodoWidget.kt <<'EOF'
@@ -144,47 +175,60 @@ jobs:
         import androidx.glance.layout.*
         import androidx.glance.text.FontWeight
         import androidx.glance.text.Text
+        import androidx.glance.text.TextDecoration
         import androidx.glance.text.TextStyle
         import androidx.glance.unit.ColorProvider
+        import kotlinx.coroutines.delay
 
         val INK = Color(0xFF151A3B)
+        val INK_DIM = Color(0x99151A3B)
         val INDIGO = Color(0xFF4B3BFF)
         val TASK_ID = ActionParameters.Key<Long>("id")
 
         class TodoWidget : GlanceAppWidget() {
             override suspend fun provideGlance(context: Context, id: GlanceId) {
                 val tasks = Store.all(context).filter { !it.done }
+                val busy = Store.completing(context)
                 val openApp = actionStartActivity(Intent(context, MainActivity::class.java))
                 provideContent {
                     Column(
-                        GlanceModifier.fillMaxSize().background(ImageProvider(R.drawable.widget_bg)).padding(16.dp)
+                        GlanceModifier.fillMaxSize().background(ImageProvider(R.drawable.widget_bg)).padding(18.dp)
                     ) {
-                        Row(
-                            GlanceModifier.fillMaxWidth().clickable(openApp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Today", GlanceModifier.defaultWeight(),
-                                style = TextStyle(color = ColorProvider(INK), fontSize = 24.sp, fontWeight = FontWeight.Bold))
-                            Text("${tasks.size} left",
-                                style = TextStyle(color = ColorProvider(INDIGO), fontSize = 13.sp, fontWeight = FontWeight.Medium))
+                        Row(GlanceModifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text("Today", GlanceModifier.defaultWeight().clickable(openApp),
+                                style = TextStyle(color = ColorProvider(INK), fontSize = 26.sp, fontWeight = FontWeight.Bold))
+                            Text("+", GlanceModifier.clickable(openApp).padding(horizontal = 8.dp),
+                                style = TextStyle(color = ColorProvider(INDIGO), fontSize = 30.sp, fontWeight = FontWeight.Medium))
                         }
-                        Spacer(GlanceModifier.height(6.dp))
+                        Text("${tasks.size} left",
+                            style = TextStyle(color = ColorProvider(INK_DIM), fontSize = 13.sp))
+                        Spacer(GlanceModifier.height(8.dp))
                         if (tasks.isEmpty()) {
-                            Text("All clear. Add the next one in the app.",
-                                style = TextStyle(color = ColorProvider(INK), fontSize = 14.sp))
+                            Text("All clear for now.",
+                                style = TextStyle(color = ColorProvider(INK_DIM), fontSize = 15.sp))
                         } else LazyColumn {
                             items(tasks, itemId = { it.id }) { t ->
-                                CheckBox(
-                                    checked = false,
-                                    onCheckedChange = actionRunCallback<ToggleAction>(actionParametersOf(TASK_ID to t.id)),
-                                    text = t.title,
-                                    maxLines = 2,
-                                    style = TextStyle(color = ColorProvider(INK), fontSize = 15.sp),
-                                    colors = CheckboxDefaults.colors(
-                                        checkedColor = ColorProvider(INDIGO), uncheckedColor = ColorProvider(INDIGO)
-                                    ),
-                                    modifier = GlanceModifier.fillMaxWidth().padding(vertical = 3.dp)
-                                )
+                                val fading = t.id in busy
+                                Row(
+                                    GlanceModifier.fillMaxWidth().padding(vertical = 8.dp)
+                                        .clickable(actionRunCallback<ToggleAction>(actionParametersOf(TASK_ID to t.id))),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Image(
+                                        provider = ImageProvider(if (fading) R.drawable.ic_check else R.drawable.ic_ring),
+                                        contentDescription = null,
+                                        modifier = GlanceModifier.size(26.dp)
+                                    )
+                                    Spacer(GlanceModifier.width(12.dp))
+                                    Text(
+                                        t.title, maxLines = 2,
+                                        style = TextStyle(
+                                            color = ColorProvider(if (fading) INK_DIM else INK),
+                                            fontSize = 16.sp,
+                                            textDecoration = if (fading) TextDecoration.LineThrough else TextDecoration.None
+                                        )
+                                    )
+                                }
                             }
                         }
                     }
@@ -194,7 +238,12 @@ jobs:
 
         class ToggleAction : ActionCallback {
             override suspend fun onAction(context: Context, glanceId: GlanceId, parameters: ActionParameters) {
-                parameters[TASK_ID]?.let { Store.toggle(context, it) }
+                val id = parameters[TASK_ID] ?: return
+                Store.setCompleting(context, id, true)
+                TodoWidget().updateAll(context)
+                delay(450)
+                Store.toggle(context, id)
+                Store.setCompleting(context, id, false)
                 TodoWidget().updateAll(context)
             }
         }
