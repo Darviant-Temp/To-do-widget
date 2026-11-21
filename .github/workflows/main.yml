@@ -127,6 +127,7 @@ jobs:
         package com.darshan.todo
 
         import android.content.Context
+        import android.content.Intent
         import androidx.compose.ui.graphics.Color
         import androidx.compose.ui.unit.dp
         import androidx.compose.ui.unit.sp
@@ -153,12 +154,13 @@ jobs:
         class TodoWidget : GlanceAppWidget() {
             override suspend fun provideGlance(context: Context, id: GlanceId) {
                 val tasks = Store.all(context).filter { !it.done }
+                val openApp = actionStartActivity(Intent(context, MainActivity::class.java))
                 provideContent {
                     Column(
                         GlanceModifier.fillMaxSize().background(ImageProvider(R.drawable.widget_bg)).padding(16.dp)
                     ) {
                         Row(
-                            GlanceModifier.fillMaxWidth().clickable(actionStartActivity<MainActivity>()),
+                            GlanceModifier.fillMaxWidth().clickable(openApp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text("Today", GlanceModifier.defaultWeight(),
