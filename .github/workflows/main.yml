@@ -56,6 +56,7 @@ jobs:
             implementation("androidx.compose.material3:material3")
             implementation("androidx.activity:activity-compose:1.9.2")
             implementation("androidx.glance:glance-appwidget:1.1.0")
+            implementation("androidx.datastore:datastore-preferences:1.1.1")
         }
         EOF
         cat > $P/AndroidManifest.xml <<'EOF'
@@ -142,6 +143,8 @@ jobs:
         import androidx.compose.ui.graphics.Color
         import androidx.compose.ui.unit.dp
         import androidx.compose.ui.unit.sp
+        import androidx.datastore.preferences.core.Preferences
+        import androidx.datastore.preferences.core.longPreferencesKey
         import androidx.glance.*
         import androidx.glance.action.ActionParameters
         import androidx.glance.action.actionParametersOf
@@ -150,6 +153,7 @@ jobs:
         import androidx.glance.appwidget.action.ActionCallback
         import androidx.glance.appwidget.action.actionRunCallback
         import androidx.glance.appwidget.action.actionStartActivity
+        import androidx.glance.appwidget.state.updateAppWidgetState
         import androidx.glance.layout.*
         import androidx.glance.text.FontWeight
         import androidx.glance.text.Text
@@ -164,20 +168,31 @@ jobs:
         val INK_DIM = Color(0x99151A3B)
         val INDIGO = Color(0xFF4B3BFF)
         val TASK_ID = ActionParameters.Key<Long>("id")
+        val REFRESH = longPreferencesKey("refresh")
+
+        suspend fun refreshWidgetNow(context: Context) {
+            val ids = GlanceAppWidgetManager(context).getGlanceIds(TodoWidget::class.java)
+            ids.forEach { id ->
+                updateAppWidgetState(context, id) { it[REFRESH] = System.nanoTime() }
+                TodoWidget().update(context, id)
+            }
+        }
 
         @OptIn(DelicateCoroutinesApi::class)
         fun refreshWidget(context: Context) {
             val app = context.applicationContext
-            GlobalScope.launch(Dispatchers.Default) { TodoWidget().updateAll(app) }
+            GlobalScope.launch(Dispatchers.Default) { refreshWidgetNow(app) }
         }
 
         class TodoWidget : GlanceAppWidget() {
             override val sizeMode: SizeMode = SizeMode.Exact
 
             override suspend fun provideGlance(context: Context, id: GlanceId) {
-                val tasks = Store.all(context).filter { !it.done }
                 val openApp = actionStartActivity(Intent(context, MainActivity::class.java))
                 provideContent {
+                    val prefs = currentState<Preferences>()
+                    @Suppress("UNUSED_VARIABLE") val stamp = prefs[REFRESH]
+                    val tasks = Store.all(context).filter { !it.done }
                     val rows = ((LocalSize.current.height.value - 100f) / 42f).toInt().coerceIn(1, 12)
                     Column(
                         GlanceModifier.fillMaxSize().background(ImageProvider(R.drawable.widget_bg)).padding(18.dp)
@@ -225,7 +240,7 @@ jobs:
         class ToggleAction : ActionCallback {
             override suspend fun onAction(context: Context, glanceId: GlanceId, parameters: ActionParameters) {
                 parameters[TASK_ID]?.let { Store.toggle(context, it) }
-                TodoWidget().updateAll(context)
+                refreshWidgetNow(context)
             }
         }
 
