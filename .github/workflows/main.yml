@@ -22,7 +22,7 @@ jobs:
       run: |
         P=app/src/main
         K=$P/java/com/darshan/todo
-        mkdir -p $K $P/res/xml $P/res/drawable
+        mkdir -p $K $P/res/xml $P/res/drawable $P/res/mipmap-anydpi-v26
         cat > settings.gradle.kts <<'EOF'
         pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
         dependencyResolutionManagement { repositories { google(); mavenCentral() } }
@@ -61,7 +61,8 @@ jobs:
         EOF
         cat > $P/res/xml/todo_widget_info.xml <<'EOF'
         <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
-            android:minWidth="180dp" android:minHeight="180dp"
+            android:minWidth="110dp" android:minHeight="110dp"
+            android:targetCellWidth="2" android:targetCellHeight="2"
             android:resizeMode="horizontal|vertical" android:updatePeriodMillis="1800000"
             android:initialLayout="@layout/glance_default_loading_layout"
             android:widgetCategory="home_screen"/>
@@ -86,6 +87,26 @@ jobs:
             <path android:strokeColor="#E5484D" android:strokeWidth="2"
                 android:pathData="M12,12m-9,0a9,9 0,1 1,18 0a9,9 0,1 1,-18 0"/>
         </vector>
+        EOF
+        cat > $P/res/drawable/ic_bg.xml <<'EOF'
+        <shape xmlns:android="http://schemas.android.com/apk/res/android">
+            <gradient android:startColor="#6A5BFF" android:endColor="#3A2BE0" android:angle="135"/>
+        </shape>
+        EOF
+        cat > $P/res/drawable/ic_fg.xml <<'EOF'
+        <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+            <path android:fillColor="#FFFFFF"
+                android:pathData="M42,30 L66,30 A8,8 0 0 1 74,38 L74,70 A8,8 0 0 1 66,78 L42,78 A8,8 0 0 1 34,70 L34,38 A8,8 0 0 1 42,30 Z"/>
+            <path android:strokeColor="#4B3BFF" android:strokeWidth="5" android:strokeLineCap="round"
+                android:strokeLineJoin="round" android:pathData="M44,54 L51,61 L64,46"/>
+        </vector>
+        EOF
+        cat > $P/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+        <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@drawable/ic_bg"/>
+            <foreground android:drawable="@drawable/ic_fg"/>
+        </adaptive-icon>
         EOF
         cp AndroidManifest.xml $P/AndroidManifest.xml
         for f in *.kt; do cp "$f" $K/; done
