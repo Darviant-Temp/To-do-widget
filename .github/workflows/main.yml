@@ -68,7 +68,11 @@ jobs:
                         <category android:name="android.intent.category.LAUNCHER"/>
                     </intent-filter>
                 </activity>
-                <receiver android:name=".TodoReceiver" android:exported="true">
+                <receiver android:name=".TodoReceiver" android:label="Today" android:exported="true">
+                    <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE"/></intent-filter>
+                    <meta-data android:name="android.appwidget.provider" android:resource="@xml/todo_widget_info"/>
+                </receiver>
+                <receiver android:name=".PendingReceiver" android:label="Pending" android:exported="true">
                     <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE"/></intent-filter>
                     <meta-data android:name="android.appwidget.provider" android:resource="@xml/todo_widget_info"/>
                 </receiver>
@@ -78,7 +82,7 @@ jobs:
         cat > $P/res/xml/todo_widget_info.xml <<'EOF'
         <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
             android:minWidth="180dp" android:minHeight="180dp"
-            android:resizeMode="horizontal|vertical" android:updatePeriodMillis="0"
+            android:resizeMode="horizontal|vertical" android:updatePeriodMillis="1800000"
             android:initialLayout="@layout/glance_default_loading_layout"
             android:widgetCategory="home_screen"/>
         EOF
@@ -96,35 +100,61 @@ jobs:
                 android:pathData="M12,12m-9,0a9,9 0,1 1,18 0a9,9 0,1 1,-18 0"/>
         </vector>
         EOF
+        cat > $P/res/drawable/ic_ring_red.xml <<'EOF'
+        <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+            <path android:strokeColor="#E5484D" android:strokeWidth="2"
+                android:pathData="M12,12m-9,0a9,9 0,1 1,18 0a9,9 0,1 1,-18 0"/>
+        </vector>
+        EOF
         cat > $K/Store.kt <<'EOF'
         package com.darshan.todo
 
         import android.content.Context
         import org.json.JSONArray
         import org.json.JSONObject
+        import java.time.LocalDate
+        import java.time.format.TextStyle
+        import java.util.Locale
 
-        data class Task(val id: Long, val title: String, val done: Boolean, val doneAt: Long = 0)
+        data class Task(val id: Long, val title: String, val done: Boolean, val doneAt: Long = 0, val due: Long = 0)
+
+        fun dateLabel(day: Long): String {
+            val t = LocalDate.now().toEpochDay()
+            return when (day) {
+                t -> "Today"
+                t + 1 -> "Tomorrow"
+                t - 1 -> "Yesterday"
+                else -> LocalDate.ofEpochDay(day).let {
+                    "${it.dayOfMonth} ${it.month.getDisplayName(TextStyle.SHORT, Locale.getDefault())}"
+                }
+            }
+        }
 
         object Store {
             private fun sp(c: Context) = c.getSharedPreferences("todo", Context.MODE_PRIVATE)
+            fun today(): Long = LocalDate.now().toEpochDay()
 
             @Synchronized
             fun all(c: Context): List<Task> {
                 val a = JSONArray(sp(c).getString("tasks", "[]"))
                 return (0 until a.length()).map {
                     val o = a.getJSONObject(it)
-                    Task(o.getLong("id"), o.getString("title"), o.getBoolean("done"), o.optLong("at"))
+                    Task(o.getLong("id"), o.getString("title"), o.getBoolean("done"), o.optLong("at"), o.optLong("due", today()))
                 }
             }
 
             private fun save(c: Context, list: List<Task>) {
                 val a = JSONArray()
-                list.forEach { a.put(JSONObject().put("id", it.id).put("title", it.title).put("done", it.done).put("at", it.doneAt)) }
+                list.forEach {
+                    a.put(JSONObject().put("id", it.id).put("title", it.title).put("done", it.done)
+                        .put("at", it.doneAt).put("due", it.due))
+                }
                 sp(c).edit().putString("tasks", a.toString()).commit()
             }
 
             @Synchronized
-            fun add(c: Context, title: String) = save(c, all(c) + Task(System.currentTimeMillis(), title, false))
+            fun add(c: Context, title: String, due: Long) = save(c, all(c) + Task(System.currentTimeMillis(), title, false, 0, due))
 
             @Synchronized
             fun toggle(c: Context, id: Long) = save(c, all(c).map {
@@ -133,6 +163,17 @@ jobs:
 
             @Synchronized
             fun delete(c: Context, id: Long) = save(c, all(c).filter { it.id != id })
+
+            @Synchronized
+            fun setDue(c: Context, id: Long, due: Long) = save(c, all(c).map { if (it.id == id) it.copy(due = due) else it })
+
+            @Synchronized
+            fun swap(c: Context, a: Long, b: Long) {
+                val l = all(c).toMutableList()
+                val i = l.indexOfFirst { it.id == a }
+                val j = l.indexOfFirst { it.id == b }
+                if (i >= 0 && j >= 0) { val t = l[i]; l[i] = l[j]; l[j] = t; save(c, l) }
+            }
         }
         EOF
         cat > $K/TodoWidget.kt <<'EOF'
@@ -167,14 +208,17 @@ jobs:
         val INK = Color(0xFF151A3B)
         val INK_DIM = Color(0x99151A3B)
         val INDIGO = Color(0xFF4B3BFF)
+        val CORAL = Color(0xFFE5484D)
         val TASK_ID = ActionParameters.Key<Long>("id")
         val REFRESH = longPreferencesKey("refresh")
 
         suspend fun refreshWidgetNow(context: Context) {
-            val ids = GlanceAppWidgetManager(context).getGlanceIds(TodoWidget::class.java)
-            ids.forEach { id ->
-                updateAppWidgetState(context, id) { it[REFRESH] = System.nanoTime() }
-                TodoWidget().update(context, id)
+            val mgr = GlanceAppWidgetManager(context)
+            for (w in listOf<GlanceAppWidget>(TodoWidget(), PendingWidget())) {
+                mgr.getGlanceIds(w.javaClass).forEach { id ->
+                    updateAppWidgetState(context, id) { it[REFRESH] = System.nanoTime() }
+                    w.update(context, id)
+                }
             }
         }
 
@@ -184,7 +228,7 @@ jobs:
             GlobalScope.launch(Dispatchers.Default) { refreshWidgetNow(app) }
         }
 
-        class TodoWidget : GlanceAppWidget() {
+        abstract class ListWidget(private val pending: Boolean) : GlanceAppWidget() {
             override val sizeMode: SizeMode = SizeMode.Exact
 
             override suspend fun provideGlance(context: Context, id: GlanceId) {
@@ -192,22 +236,24 @@ jobs:
                 provideContent {
                     val prefs = currentState<Preferences>()
                     @Suppress("UNUSED_VARIABLE") val stamp = prefs[REFRESH]
-                    val tasks = Store.all(context).filter { !it.done }
+                    val today = Store.today()
+                    val tasks = Store.all(context).filter { !it.done && (if (pending) it.due < today else it.due == today) }
+                    val accent = if (pending) CORAL else INDIGO
                     val rows = ((LocalSize.current.height.value - 100f) / 42f).toInt().coerceIn(1, 12)
                     Column(
                         GlanceModifier.fillMaxSize().background(ImageProvider(R.drawable.widget_bg)).padding(18.dp)
                     ) {
                         Row(GlanceModifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Text("Today", GlanceModifier.defaultWeight().clickable(openApp),
+                            Text(if (pending) "Pending" else "Today", GlanceModifier.defaultWeight().clickable(openApp),
                                 style = TextStyle(color = ColorProvider(INK), fontSize = 26.sp, fontWeight = FontWeight.Bold))
                             Text("+", GlanceModifier.clickable(openApp).padding(horizontal = 8.dp),
-                                style = TextStyle(color = ColorProvider(INDIGO), fontSize = 30.sp, fontWeight = FontWeight.Medium))
+                                style = TextStyle(color = ColorProvider(accent), fontSize = 30.sp, fontWeight = FontWeight.Medium))
                         }
                         Text("${tasks.size} left",
-                            style = TextStyle(color = ColorProvider(INK_DIM), fontSize = 13.sp))
+                            style = TextStyle(color = ColorProvider(if (pending) CORAL else INK_DIM), fontSize = 13.sp))
                         Spacer(GlanceModifier.height(8.dp))
                         if (tasks.isEmpty()) {
-                            Text("All clear for now.",
+                            Text(if (pending) "Nothing overdue." else "All clear for now.",
                                 style = TextStyle(color = ColorProvider(INK_DIM), fontSize = 15.sp))
                         }
                         tasks.take(rows).forEach { t ->
@@ -217,25 +263,28 @@ jobs:
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Image(
-                                    provider = ImageProvider(R.drawable.ic_ring),
+                                    provider = ImageProvider(if (pending) R.drawable.ic_ring_red else R.drawable.ic_ring),
                                     contentDescription = null,
                                     modifier = GlanceModifier.size(26.dp)
                                 )
                                 Spacer(GlanceModifier.width(12.dp))
-                                Text(
-                                    t.title, maxLines = 1,
-                                    style = TextStyle(color = ColorProvider(INK), fontSize = 16.sp)
-                                )
+                                Text(t.title, GlanceModifier.defaultWeight(), maxLines = 1,
+                                    style = TextStyle(color = ColorProvider(INK), fontSize = 16.sp))
+                                if (pending) Text(dateLabel(t.due),
+                                    style = TextStyle(color = ColorProvider(INK_DIM), fontSize = 12.sp))
                             }
                         }
                         if (tasks.size > rows) {
                             Text("+${tasks.size - rows} more", GlanceModifier.clickable(openApp).padding(top = 4.dp),
-                                style = TextStyle(color = ColorProvider(INDIGO), fontSize = 14.sp))
+                                style = TextStyle(color = ColorProvider(accent), fontSize = 14.sp))
                         }
                     }
                 }
             }
         }
+
+        class TodoWidget : ListWidget(false)
+        class PendingWidget : ListWidget(true)
 
         class ToggleAction : ActionCallback {
             override suspend fun onAction(context: Context, glanceId: GlanceId, parameters: ActionParameters) {
@@ -247,7 +296,15 @@ jobs:
         class TodoReceiver : GlanceAppWidgetReceiver() {
             override val glanceAppWidget: GlanceAppWidget = TodoWidget()
         }
+
+        class PendingReceiver : GlanceAppWidgetReceiver() {
+            override val glanceAppWidget: GlanceAppWidget = PendingWidget()
+        }
         EOF
+        # ---- part 2 ----
+    - name: Write app screen
+      run: |
+        K=app/src/main/java/com/darshan/todo
         cat > $K/MainActivity.kt <<'EOF'
         package com.darshan.todo
 
@@ -290,6 +347,7 @@ jobs:
         private val Mist = Color(0xFFEEF0FF)
         private val Lilac = Color(0xFFD9DCFF)
 
+        @OptIn(ExperimentalMaterial3Api::class)
         @Composable
         fun App(tick: Int) {
             val ctx = LocalContext.current
@@ -297,76 +355,123 @@ jobs:
             LaunchedEffect(tick) { tasks = Store.all(ctx) }
             var tab by remember { mutableIntStateOf(0) }
             var text by remember { mutableStateOf("") }
+            var newDay by remember { mutableLongStateOf(Store.today()) }
+            var picking by remember { mutableStateOf(false) }
+            var editId by remember { mutableStateOf<Long?>(null) }
             fun sync() { tasks = Store.all(ctx); refreshWidget(ctx) }
-            fun add() { if (text.isNotBlank()) { Store.add(ctx, text.trim()); text = ""; sync() } }
+            fun add() { if (text.isNotBlank()) { Store.add(ctx, text.trim(), newDay); text = ""; sync() } }
 
-            val doneCount = tasks.count { it.done }
+            val today = Store.today()
+            val todo = tasks.filter { !it.done && it.due >= today }
+            val pend = tasks.filter { !it.done && it.due < today }
+            val done = tasks.filter { it.done }.sortedByDescending { it.doneAt }
+            val shown = when (tab) { 0 -> todo; 1 -> pend; else -> done }
+            val doneCount = done.size
             val progress by animateFloatAsState(if (tasks.isEmpty()) 0f else doneCount / tasks.size.toFloat(), label = "p")
-            val shown = if (tab == 0) tasks.filter { !it.done } else tasks.filter { it.done }.sortedByDescending { it.doneAt }
 
-            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Mist, Lilac)))) {
-                Column(Modifier.systemBarsPadding().imePadding().padding(horizontal = 22.dp)) {
-                    Spacer(Modifier.height(20.dp))
-                    Text("Today", color = INK, fontSize = 44.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-1.5).sp)
-                    Spacer(Modifier.height(10.dp))
-                    Box(Modifier.fillMaxWidth().height(8.dp).clip(CircleShape).background(Color.White.copy(alpha = .7f))) {
-                        Box(Modifier.fillMaxWidth(progress).fillMaxHeight().clip(CircleShape).background(INDIGO))
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    Text("$doneCount of ${tasks.size} done", color = INK.copy(alpha = .6f), fontSize = 13.sp)
-                    Spacer(Modifier.height(18.dp))
-                    Row(Modifier.clip(CircleShape).background(Color.White.copy(alpha = .6f)).padding(4.dp)) {
-                        listOf("To do", "Done").forEachIndexed { i, label ->
-                            Box(
-                                Modifier.clip(CircleShape).background(if (tab == i) INDIGO else Color.Transparent)
-                                    .clickable { tab = i }.padding(horizontal = 22.dp, vertical = 9.dp)
-                            ) { Text(label, color = if (tab == i) Color.White else INK, fontWeight = FontWeight.SemiBold) }
+            MaterialTheme(colorScheme = lightColorScheme(primary = INDIGO, onPrimary = Color.White)) {
+                if (picking) {
+                    val start = editId?.let { id -> tasks.firstOrNull { it.id == id }?.due } ?: newDay
+                    val st = rememberDatePickerState(initialSelectedDateMillis = start * 86400000L)
+                    DatePickerDialog(
+                        onDismissRequest = { picking = false; editId = null },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                st.selectedDateMillis?.let { ms ->
+                                    val d = Math.floorDiv(ms, 86400000L)
+                                    val e = editId
+                                    if (e != null) { Store.setDue(ctx, e, d); sync() } else newDay = d
+                                }
+                                picking = false; editId = null
+                            }) { Text("OK") }
+                        },
+                        dismissButton = { TextButton(onClick = { picking = false; editId = null }) { Text("Cancel") } }
+                    ) { DatePicker(state = st) }
+                }
+                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Mist, Lilac)))) {
+                    Column(Modifier.systemBarsPadding().imePadding().padding(horizontal = 22.dp)) {
+                        Spacer(Modifier.height(20.dp))
+                        Text("Tasks", color = INK, fontSize = 44.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-1.5).sp)
+                        Spacer(Modifier.height(10.dp))
+                        Box(Modifier.fillMaxWidth().height(8.dp).clip(CircleShape).background(Color.White.copy(alpha = .7f))) {
+                            Box(Modifier.fillMaxWidth(progress).fillMaxHeight().clip(CircleShape).background(INDIGO))
                         }
-                    }
-                    Spacer(Modifier.height(14.dp))
-                    LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        if (shown.isEmpty()) item {
-                            Text(if (tab == 0) "Nothing pending. Add a task below." else "Ticked tasks land here.",
-                                color = INK.copy(alpha = .55f), modifier = Modifier.padding(top = 24.dp))
-                        }
-                        items(shown, key = { it.id }) { t ->
-                            Row(
-                                Modifier.fillMaxWidth().animateItem().clip(RoundedCornerShape(22.dp)).background(Color.White)
-                                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
+                        Spacer(Modifier.height(6.dp))
+                        Text("$doneCount of ${tasks.size} done", color = INK.copy(alpha = .6f), fontSize = 13.sp)
+                        Spacer(Modifier.height(18.dp))
+                        Row(Modifier.clip(CircleShape).background(Color.White.copy(alpha = .6f)).padding(4.dp)) {
+                            listOf("To do", if (pend.isEmpty()) "Pending" else "Pending ${pend.size}", "Done").forEachIndexed { i, label ->
                                 Box(
-                                    Modifier.size(28.dp).clip(CircleShape).background(if (t.done) INDIGO else Color.Transparent)
-                                        .border(2.dp, INDIGO, CircleShape).clickable { Store.toggle(ctx, t.id); sync() },
-                                    contentAlignment = Alignment.Center
-                                ) { if (t.done) Text("✓", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold) }
-                                Spacer(Modifier.width(14.dp))
-                                Text(
-                                    t.title, Modifier.weight(1f), fontSize = 17.sp,
-                                    color = if (t.done) INK.copy(alpha = .4f) else INK,
-                                    textDecoration = if (t.done) TextDecoration.LineThrough else null
-                                )
-                                if (t.done) Text("✕", color = INK.copy(alpha = .4f), fontSize = 16.sp,
-                                    modifier = Modifier.clickable { Store.delete(ctx, t.id); sync() }.padding(6.dp))
+                                    Modifier.clip(CircleShape).background(if (tab == i) INDIGO else Color.Transparent)
+                                        .clickable { tab = i }.padding(horizontal = 16.dp, vertical = 9.dp)
+                                ) { Text(label, color = if (tab == i) Color.White else INK, fontWeight = FontWeight.SemiBold) }
                             }
                         }
+                        Spacer(Modifier.height(14.dp))
+                        LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            if (shown.isEmpty()) item {
+                                Text(when (tab) { 0 -> "Nothing planned. Add a task below."; 1 -> "Nothing overdue."; else -> "Ticked tasks land here." },
+                                    color = INK.copy(alpha = .55f), modifier = Modifier.padding(top = 24.dp))
+                            }
+                            items(shown, key = { it.id }) { t ->
+                                val i = shown.indexOf(t)
+                                Row(
+                                    Modifier.fillMaxWidth().animateItem().clip(RoundedCornerShape(22.dp)).background(Color.White)
+                                        .padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        Modifier.size(28.dp).clip(CircleShape).background(if (t.done) INDIGO else Color.Transparent)
+                                            .border(2.dp, if (!t.done && t.due < today) CORAL else INDIGO, CircleShape)
+                                            .clickable { Store.toggle(ctx, t.id); sync() },
+                                        contentAlignment = Alignment.Center
+                                    ) { if (t.done) Text("✓", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold) }
+                                    Spacer(Modifier.width(14.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            t.title, fontSize = 17.sp,
+                                            color = if (t.done) INK.copy(alpha = .4f) else INK,
+                                            textDecoration = if (t.done) TextDecoration.LineThrough else null
+                                        )
+                                        Text(
+                                            dateLabel(t.due), fontSize = 12.sp,
+                                            color = if (!t.done && t.due < today) CORAL else INK.copy(alpha = .5f),
+                                            modifier = Modifier.clickable { editId = t.id; picking = true }.padding(top = 2.dp, bottom = 2.dp)
+                                        )
+                                    }
+                                    if (tab != 2) {
+                                        Text("▲", color = INK.copy(alpha = .55f), fontSize = 15.sp,
+                                            modifier = Modifier.clickable { if (i > 0) { Store.swap(ctx, t.id, shown[i - 1].id); sync() } }.padding(9.dp))
+                                        Text("▼", color = INK.copy(alpha = .55f), fontSize = 15.sp,
+                                            modifier = Modifier.clickable { if (i < shown.size - 1) { Store.swap(ctx, t.id, shown[i + 1].id); sync() } }.padding(9.dp))
+                                    }
+                                    Text("✕", color = INK.copy(alpha = .4f), fontSize = 15.sp,
+                                        modifier = Modifier.clickable { Store.delete(ctx, t.id); sync() }.padding(9.dp))
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Box(
+                            Modifier.clip(CircleShape).background(Color.White.copy(alpha = .75f))
+                                .clickable { editId = null; picking = true }.padding(horizontal = 14.dp, vertical = 8.dp)
+                        ) { Text("📅  ${dateLabel(newDay)}", color = INK, fontSize = 14.sp, fontWeight = FontWeight.Medium) }
+                        TextField(
+                            value = text, onValueChange = { text = it }, singleLine = true,
+                            placeholder = { Text("What needs doing?") },
+                            shape = RoundedCornerShape(26.dp),
+                            keyboardActions = KeyboardActions(onDone = { add() }),
+                            trailingIcon = {
+                                Box(Modifier.padding(end = 6.dp).size(40.dp).clip(CircleShape).background(INDIGO).clickable { add() },
+                                    contentAlignment = Alignment.Center) { Text("+", color = Color.White, fontSize = 24.sp) }
+                            },
+                            colors = TextFieldDefaults.colors(
+                                focusedContainerColor = Color.White, unfocusedContainerColor = Color.White,
+                                focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
+                                cursorColor = INDIGO, focusedTextColor = INK, unfocusedTextColor = INK
+                            ),
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 14.dp)
+                        )
                     }
-                    TextField(
-                        value = text, onValueChange = { text = it }, singleLine = true,
-                        placeholder = { Text("What needs doing?") },
-                        shape = RoundedCornerShape(26.dp),
-                        keyboardActions = KeyboardActions(onDone = { add() }),
-                        trailingIcon = {
-                            Box(Modifier.padding(end = 6.dp).size(40.dp).clip(CircleShape).background(INDIGO).clickable { add() },
-                                contentAlignment = Alignment.Center) { Text("+", color = Color.White, fontSize = 24.sp) }
-                        },
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = Color.White, unfocusedContainerColor = Color.White,
-                            focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
-                            cursorColor = INDIGO, focusedTextColor = INK, unfocusedTextColor = INK
-                        ),
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp)
-                    )
                 }
             }
         }
